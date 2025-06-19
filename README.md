@@ -1,1 +1,2 @@
-"# LWPTrends" 
+![](/Images/TimeTrends.jpg)
+

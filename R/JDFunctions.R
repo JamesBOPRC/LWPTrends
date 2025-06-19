@@ -1,16 +1,18 @@
+####################################################################
+#### method for searching for a start point for trend analysis. ####
+####################################################################
 
-#method for searching for a start point for trend analysis.
 ContinuousTS <- function (data, gap)
 {
 
   require(dplyr)
 
   names(data) <- c("SiteID", "Time", "Value")
-  Min_date <- as.Date(Sys.time())
-  Max_date <- as.Date(max(data$Time))
+  Min_date <- as.Date(Sys.time(),tz="etc/GMT+12")
+  Max_date <- as.Date(max(data$Time),tz="etc/GMT+12")
 
 
-  dat_sub <- as.Date(data[, 2],tz="+12")
+  dat_sub <- as.Date(data$Time,tz="etc/GMT+12")
   dat_sub <- dat_sub[order(dat_sub, decreasing = T)]
   dat_diff <- as.numeric(diff(dat_sub))
   if (Max_date - max(dat_sub) < (5 * 365)) {
@@ -30,607 +32,522 @@ ContinuousTS <- function (data, gap)
   return(Min_date)
 }
 
+#####################################################################
+##### Basic Trend Analysis.  Allows you to fix flow adjustment, #####
+##### and seasonal adjustment.  There is no 'automation'.       #####
+##### adjustment is either on or off for each covariate         #####
+##### This was previously known as 'Trend_Calc'                 #####
+#####################################################################
 
-################################################################################################################
-##### Basic Trend Analysis.  Allows you to fix flow adjustment, and seasonal adjustment.  No  'automation'.
-#Trend_Calc
+#Data should be in the format - "Site","LocationName","Time","FLOW", PARAMETERS 1:X
+# you need to rename the parameters in capitals....
+# myDate must be present in the timeframe
 
-Fixed_Trend_Analysis <- function(Data,param_colnames,siteID_col,
-                       time_col = "Time",
-                       Timeframe="All",
-                       Seasonal = F,
-                       Co_variate_Adjust=F,
-                       Co_variate_col=NA,
-                       log_parameters = c("ECOLI","TSS","FC","ENT")){
+Fixed_Trend_Analysis <- function(Data,
+                                 param_colnames,
+                                 siteID_col,
+                                 time_col = "Time",
+                                 Timeframe=NA,
+                                 Seasonal = F,
+                                 Co_variate_Adjust=F,
+                                 Co_variate_col=NA,
+                                 Data_gap = 3,
+                                 log_parameters = c("ECOLI","TSS","FC","ENT")){
 
 
-  require(plyr)
-  require(lubridate)
-  require(NADA)
-  require(gam)
+  library(plyr)
+  library(lubridate)
+  library(NADA)
+  library(gam)
+  library(rlang)
 
+  #call data
   Data <- Data
+
+  #define parameter column names
   param_colnames <- param_colnames
-  Data[,siteID_col] <- as.factor(Data[,siteID_col])
+
+  #set the siteID as a factor
+  #Data <-   Data %>% mutate(!!sym(siteID_col) := as.factor(!!sym(siteID_col)))
+  Sites <-  Data %>% pull(siteID_col) %>% unique()
+
+  #create an empty final DF
   Final_Df <- NULL
 
   #for each site
-  for(i in levels(Data[,siteID_col])){
+  for(i in Sites){
 
     SiteName=i
 
     #for each defined parameter (as column names)
     for(p in param_colnames){
 
-      #if flow adjustment is required
+      #if flow adjustment is required - create dataframe with siteID, time and flow
       if(Co_variate_Adjust==T){
         #make a dataset that
-        current_dat <- Data[Data[[siteID_col]]==i,c(siteID_col,time_col,p,flow_col)]
-      }else{
-        current_dat <- Data[Data[[siteID_col]]==i,c(siteID_col,time_col,p)]
-      }
 
+        if(is.na(Co_variate_col)){stop("Covariate adjustment is true but you haven't defined a co-variate column.")}
+
+
+
+        current_dat <- Data[Data[[siteID_col]]==i,c(siteID_col,time_col,p,Co_variate_col)]
+      }else{
+
+
+        current_dat <- Data[Data[[siteID_col]]==i,c(siteID_col,time_col,p)]
+      } #end loop
+
+      #ensure no missing data for trend analysis
       current_dat <- current_dat[complete.cases(current_dat),]
 
-      if(nrow(current_dat)>0){
+      #this is to ensure that there is actually data
+      if(nrow(current_dat)==0){
+        cat(paste0("There is no ",p," data at ",i,"/n"))
+
+        #this is the other case if no data.
+        Trend_Analysis <- data.frame( "nObs" = "NOT ENOUGH DATA","S"= NA,"VarS"= NA,"D"= NA,"tau"= NA,"Z"=NA,"p"= NA,"Probability"= NA,
+                                      "prop.censored"= NA,"prop.unique"= NA,"no.censorlevels"= NA,"Median"= NA,"Sen_VarS"= NA,"AnnualSenSlope"= NA,
+                                      "Intercept"= NA,"Lci"= NA,"Uci"= NA,"AnalysisNote"= NA,"Sen_Probability"= NA,"Probabilitymax"= NA,"Probabilitymin"= NA,
+                                      "Percent.annual.change"= NA,"TrendCategory"= NA,"TrendDirection"= NA, "Season_ADJ"= NA,"Season_ADJ_p"= NA ,"Flow_ADJ"= NA,"Flow_MOD"= NA,"Flow_MOD_p"= NA,
+                                      "Site"= i,"analyte"= p,"Start_Year"= Start_Year,"End_Year"= End_Year,"Time_Period"=Timeframe)
 
 
-        if(Timeframe == "All"|Timeframe=="all"){
-          current_dat <-current_dat[ as.Date(current_dat[,time_col]) > as.Date(ContinuousTS_2(current_dat,gap = 3*365)),]
-          Start_Year <-  format(ContinuousTS_2(current_dat,gap = 3*365),"%Y")
-          End_Year <-  format(max(current_dat[,time_col]),"%Y")
+        #this loop assumes a suitable dataframe
+      } else if(nrow(current_dat)>0){
+
+
+        #no definition so give all data
+        if(is.na(Timeframe)){
+          current_dat <-current_dat %>% filter(as.Date(current_dat[[time_col]],tz="etc/GMT+12")>as.Date(ContinuousTS(current_dat, gap = Data_gap * 365), tz = "etc/GMT+12"))
+          Start_Year <-  format(min(current_dat[[time_col]],na.rm=T),"%Y")
+          End_Year <-  format(max(current_dat[[time_col]],na.rm=T),"%Y")
+
         }else{
-          current_dat <-current_dat[as.Date(current_dat[,time_col]) > as.Date(max(current_dat[,time_col]))-(365*as.numeric(Timeframe)),]
+          #otherwise subset to the current date minus timeframe as a number
+          current_dat <-current_dat %>% filter(as.Date(current_dat[[time_col]],tz="etc/GMT+12")>
+                                                 (as.Date(max(current_dat[[time_col]]), tz = "etc/GMT+12")-years(Timeframe)))
 
-          End_Year <-  format(max(current_dat[,time_col]),"%Y")
-          Start_Year <-  format(max(current_dat[,time_col])- years(as.numeric(Timeframe)),"%Y")
+          #and then check to see if the dataset is continuous
+          current_dat <-current_dat %>% filter(as.Date(current_dat[[time_col]],tz="etc/GMT+12")>
+                                                 as.Date(ContinuousTS(current_dat, gap = Data_gap * 365), tz = "etc/GMT+12"))
 
+          End_Year <-  format(max(current_dat[[time_col]],na.rm=T),"%Y")
+          Start_Year <-  format(min(current_dat[[time_col]],na.rm=T),"%Y")
         }
 
+        #does the parameter need to be log scaled?
+        if(p %in% log_parameters){
+          current_dat[,3] <- log10(current_dat[,3]+1)
+          cat(paste0("Parameter ",p," has been log10 transformed at ", i,"\n"))
 
-        if(p %in% log_parameters){current_dat[,3] <- log10(current_dat[,3]+1)}
+          }
 
-        #only run trend analysis if more than 10 values
+        #only run trend analysis if you have more than 10 values
         if(nrow(current_dat[,1:3])>=10){
 
-          current_dat$myDate <- as.Date(as.character(current_dat[,time_col]),"%Y-%m-%d")
+          #create a new column called myDate
+          current_dat <- current_dat %>% mutate(myDate = as.Date(current_dat[[time_col]],tz="etc/GMT+12"))
           current_dat <- GetMoreDateInfo(current_dat)
 
+          #remove alpha detects
+          current_dat <-  RemoveAlphaDetect(current_dat,ColToUse = p)
 
-
-          current_dat$Season<-current_dat$Month
-          SeasonString<-levels(current_dat$Season)
-
-          NewValues <- RemoveAlphaDetect(current_dat[,p])
-          current_dat <- cbind.data.frame(current_dat, NewValues)
+          #inspect data
+          current_dat <- InspectTrendData(current_dat)
 
 
 
-          #png(filename="test.png")
-          #p1 <- InspectData(current_dat, StartYear = Start_Year, EndYear = End_Year, FlowtoUse = "FLOW",plotType = "TimeSeries", main= "Ex 1a Time Series of Monthly Data")
-          #dev.off()
-
-          #InspectData(current_dat, StartYear = Start_Year, EndYear = End_Year, plotType = "Matrix",PlotMat="RawData",main="Matrix of Values: monthly data")
-          #InspectData(current_dat, StartYear = Start_Year, EndYear = End_Year, plotType = "Matrix",PlotMat="Censored",main="Matrix of censoring: monthly data")
-
-          pst <- SeasonalityTest(current_dat,main=paste(i, ": Raw Monthly Data",sep=""),do.plot = F)
-
+#if the input forces covariate adjustment
           if(Co_variate_Adjust==T){
+
+            #run covariate adjustment models
             adj <- AdjustValues(current_dat[complete.cases(current_dat),], method = c("Gam","LOESS"),main=paste(i, ": Co_variate_Adjustment_",Timeframe,sep=""), ValuesToAdjust = 'RawValue', Covariate = Co_variate_col, Span = c(0.7,0.8,0.9),doPlot = F, plotpval=T)
+
+            #work out the smallest p value
             minflowp <- min(adj$LOESS0.7_p[1],adj$Gam_p[1])
 
+            #name of the CV adjustment model used
+            CVmod <- colnames(adj[which(adj[1,]==minflowp)])
 
-            #          if(minflowp<0.05){
+            #removing _p from string
+            CVmod_data <- substr(CVmod,1,nchar(CVmod)-2)
 
-            flowmod <- colnames(adj[which(adj[1,]==minflowp)])
-            flowmod_data <- substr(flowmod,1,nchar(flowmod)-2)
-            current_dat<-merge(current_dat[complete.cases(current_dat),],adj[,c('myDate',flowmod_data)])
+            #merge current dat with adjusted values
+            current_dat<-merge(current_dat[complete.cases(current_dat),],adj[,c('myDate',CVmod_data)])
 
-            png(filename=paste(i,"_",p,"_Co_variate_adjust_",Timeframe,".png",sep = ""))
-            AdjustValues(current_dat[complete.cases(current_dat),], method = c("Gam","LOESS"),main=paste(i,"_",p,": Co_variate_Adjustment_",Timeframe,sep=""), ValuesToAdjust = 'RawValue', Covariate = Co_variate_col, Span = c(0.7,0.8,0.9),doPlot = T, plotpval=T)
-            dev.off()
+            cat(paste0("Parameter ",p," will be adjusted by ",Co_variate_col,  " at ", i," with a pvalue = ",as.numeric(round(minflowp)),"\n"))
 
+
+            seasonp <- GetSeason(current_dat)[[2]][1,3]
+    #if the input forces seasonal adjustment
             if(Seasonal==T){
-              png(filename=paste(i,"_",p,"_Seasonal_Trend_Plot_",Timeframe,".png",sep = ""))
-              Trend_Analysis <- SeasonalTrendAnalysis(current_dat,ValuesToUse=flowmod_data,mymain=paste(i,"_",p,"_Co_variate_Adjusted: Seasonal Trend Analysis_",Timeframe,sep=""),doPlot=T)
-              dev.off()
-
+              #carry out a seasonal trend analysis
+              cat(paste0("Seasonal adjustment for ",p," will be carried out at ", i," with a pvalue of ",as.numeric(round(seasonp)), "\n"))
+              current_dat <- GetSeason(current_dat)[[1]]
+              Trend_Analysis <- SeasonalTrendAnalysis(current_dat,ValuesToUse=CVmod_data,Timeframe,doPlot=F)
               Trend_Analysis$Season_ADJ <- "YES"
-              Trend_Analysis$Season_ADJ_p <- pst$pvalue
+              Trend_Analysis$Season_ADJ_p <- GetSeason(current_dat)[[2]][1,3]
 
-              # #non FA TA as well
-              # Trend_Analysis_2 <- SeasonalTrendAnalysis(current_dat, mymain=paste(i,"_",p,"_Raw Data: Seasonal Trend Analysis",sep=""),doPlot=T)
-              # Trend_Analysis_2$Season_ADJ <- "YES"
-
+            #covariate adjustment but no seasonal adjustment
             }else{
-              png(filename=paste(i,"_",p,"_Non_Seasonal_Trend_Plot_",Timeframe,".png",sep = ""))
-              Trend_Analysis <- NonSeasonalTrendAnalysis(current_dat,ValuesToUse=flowmod_data,mymain=paste(i,"_",p,"_Co_variate_Adjusted: Non-Seasonal Trend Analysis_",Timeframe,sep=""),doPlot=T)
-              dev.off()
-              Trend_Analysis$Season_ADJ <- "NO"
-              Trend_Analysis$Season_ADJ_p <- "N/A"
-
-            }
-
-            Trend_Analysis$Flow_ADJ <- "YES"
-            Trend_Analysis$Flow_MOD <- flowmod_data
-            Trend_Analysis$Flow_MOD_p <- minflowp
-
-
-          }else{#if not flow adjust = T
-
-            if(Seasonal==T){
-              png(filename=paste(i,"_",p,"_Trend_Plot_",Timeframe,".png",sep = ""))
-              Trend_Analysis <- SeasonalTrendAnalysis(current_dat, mymain=paste(i,"_",p,"_Raw Data: Seasonal Trend Analysis_",Timeframe,sep=""),doPlot=T)
-              dev.off()
-              Trend_Analysis$Season_ADJ <- "YES"
-              Trend_Analysis$Season_ADJ_p <- pst$pvalue
-
-            }else{
-              png(filename=paste(i,"_",p,"_Trend_Plot_",Timeframe,".png",sep = ""))
-              Trend_Analysis <- NonSeasonalTrendAnalysis(current_dat,mymain=paste(i,"_",p,"_Raw Data: Non-Seasonal Trend Analysis_",Timeframe,sep=""),doPlot=T)
-              dev.off()
-
+              cat(paste0("No seasonal adjustment for ",p," will be carried out at ", i,"\n"))
+              Trend_Analysis <- NonSeasonalTrendAnalysis(current_dat,ValuesToUse=CVmod_data,doPlot=F)
               Trend_Analysis$Season_ADJ <- "NO"
               Trend_Analysis$Season_ADJ_p <- "N/A"
             }
+    #metadata to state that it was covariate adjusted
+            Trend_Analysis$CV_ADJ <- "YES"
+            Trend_Analysis$CV_MOD <- CVmod_data
+            Trend_Analysis$CV_MOD_p <- minflowp
 
+#if the input does not force covariate adjustment
+          }else{
+            cat(paste0("No covariate adjustment for ",p," will be carried out at ",i,"\n"))
 
-            Trend_Analysis$Flow_ADJ <- "NO"
-            Trend_Analysis$Flow_MOD <- "N/A"
-            Trend_Analysis$Flow_MOD_p <- "N/A"
+            seasonp <- GetSeason(current_dat)[[2]][1,3]
+            if(Seasonal==T){
+              #carry out a seasonal trend analysis
 
+              current_dat <- GetSeason(current_dat)[[1]]
+              cat(paste0("Seasonal adjustment for ",p," will be carried out at ", i," with a pvalue of ",as.numeric(round(seasonp)), "\n"))
+              Trend_Analysis <- SeasonalTrendAnalysis(current_dat,doPlot=F)#this doesn't need a 'valuesToUse' as it will default to RawValue
+              Trend_Analysis$Season_ADJ <- "YES"
+              Trend_Analysis$Season_ADJ_p <- GetSeason(current_dat)[[2]][1,3]
+
+            }else{
+              cat(paste0("No seasonal adjustment for ",p," will be carried out at ", i,"\n"))
+              Trend_Analysis <- NonSeasonalTrendAnalysis(current_dat,doPlot=T)
+              Trend_Analysis$Season_ADJ <- "NO"
+              Trend_Analysis$Season_ADJ_p <- "N/A"
+            }
+
+#metadata to state that it was not covariate adjusted
+            Trend_Analysis$CV_ADJ <- "NO"
+            Trend_Analysis$CV_MOD <- "N/A"
+            Trend_Analysis$CV_MOD_p <- "N/A"
 
 
           }
 
-
+          #additional metadata
           Trend_Analysis$Site <- i
-          Trend_Analysis$Param <- p
+          Trend_Analysis$analyte <- p
           Trend_Analysis$Start_Year <-Start_Year
           Trend_Analysis$End_Year <- End_Year
           Trend_Analysis$Time_Period <- Timeframe
 
         }else{
+          #this is the other case if not more than 10 values - dataframe of NA values.
           Trend_Analysis <- data.frame( "nObs" = "NOT ENOUGH DATA","S"= NA,"VarS"= NA,"D"= NA,"tau"= NA,"Z"=NA,"p"= NA,"Probability"= NA,
                                         "prop.censored"= NA,"prop.unique"= NA,"no.censorlevels"= NA,"Median"= NA,"Sen_VarS"= NA,"AnnualSenSlope"= NA,
                                         "Intercept"= NA,"Lci"= NA,"Uci"= NA,"AnalysisNote"= NA,"Sen_Probability"= NA,"Probabilitymax"= NA,"Probabilitymin"= NA,
                                         "Percent.annual.change"= NA,"TrendCategory"= NA,"TrendDirection"= NA, "Season_ADJ"= NA,"Season_ADJ_p"= NA ,"Flow_ADJ"= NA,"Flow_MOD"= NA,"Flow_MOD_p"= NA,
-                                        "Site"= NA,"Param"= NA,"Start_Year"= NA,"End_Year"= NA,"Time_Period"=NA)
-
-
-          Trend_Analysis$Site <- i
-          Trend_Analysis$Param <- p
-          Trend_Analysis$Start_Year <-Start_Year
-          Trend_Analysis$End_Year <- End_Year
-          Trend_Analysis$Time_Period <- Timeframe
-
-
+                                        "Site"= i,"analyte"= p,"Start_Year"= Start_Year,"End_Year"= End_Year,"Time_Period"=Timeframe)
 
         }
-
-
-
+        #merge together the holder and the trend analysis output
         Final_Df <- rbind(Final_Df,Trend_Analysis)
 
-
       }
-    }
-  }
+    }#end of parameter loop
+  }#end of site loop
   return(Final_Df)
-}
+  detach(plyr)
+}#end of function
 
 
 
 ############################################################################################################
 
+#############################################################################
+##### Flexible Trend Analysis.                                          #####
+##### The rules for this are flow adjust if FlowMod p-value is < 0.05   #####
+#####       and seasonally adjust if ADJ_p <0.05.                       #####
+#############################################################################
 
-#### The rules for this are flow adjust if FlowMod p-value is < 0.05
-#### and seasonally adjust if ADJ_p <0.05.
-
-Flexible_Trend_Analysis <- function(Data,param_colnames,siteID_col,
+#season will be automatically detected.
+Automated_Trend_Analysis <- function(Data,
+                                     param_colnames,
+                                     siteID_col,
                                      time_col = "Time",
-                                     Timeframe="All",
-                                      Co_variate_col=NA,
-                                     season = "Quarter",
-                                    log_parameters = c("ECOLI","TSS","FC","ENT")){
+                                     Timeframe="All", #or a number that will be converted to years
+                                     Co_variate_col=NA,
+                                     Data_gap = 3,
+                                     min_values = 20,
+                                     log_parameters = c("ECOLI","TSS","FC","ENT")){
 
 
-  require(plyr)
-  require(lubridate)
-  require(NADA)
-  require(gam)
+  library(plyr)
+  library(lubridate)
+  library(NADA)
+  library(gam)
+  library(rlang)
 
+
+  #call data
   Data <- Data
+
+  #define parameter column names
   param_colnames <- param_colnames
-  Data[,siteID_col] <- as.factor(Data[,siteID_col])
+
+  #set the siteID as a factor
+  #Data <-   Data %>% mutate(!!sym(siteID_col) := as.factor(!!sym(siteID_col)))
+  Sites <-  Data %>% pull(siteID_col) %>% unique()
+
+  #create an empty final DF
   Final_Df <- NULL
 
-  for(i in levels(Data[,siteID_col])){
+  #for each site
+  for(i in Sites){
 
     SiteName=i
 
+    #for each defined parameter (as column names)
     for(p in param_colnames){
 
-      #two different data files
-
-      current_dat <- Data[Data[[siteID_col]]==i,c(siteID_col,time_col,p,flow_col)]
-
-
-      if(sum(!is.na(current_dat[,p]))>20){
+      #if there is a coariate column, put this in the dataset
+      if(is.na(Co_variate_col)){
+        current_dat <- Data[Data[[siteID_col]]==i,c(siteID_col,time_col,p)] %>% filter(complete.cases(.))
+        cat(paste0(p," data at ",i, " will not be adjusted as there is no defined co-variate\n"))
 
 
-        if(Timeframe == "All"|Timeframe=="all"){
-          current_dat <-current_dat[ as.Date(current_dat[,time_col]) > as.Date(ContinuousTS_2(current_dat,gap = 3*365)),]
+      }else{#if not then don't, and don't bother with flow adjustment
+          current_dat <- Data[Data[[siteID_col]]==i,c(siteID_col,time_col,p,Co_variate_col)]%>% filter(complete.cases(.))
+          cat(paste0("Attempt to adjust ",p," by ",Co_variate_col,  " at ", i,"\n"))
+
+      }
 
 
-          Start_Year <-  format(ContinuousTS_2(current_dat,gap = 3*365),"%Y")
-          End_Year <-  format(max(current_dat[,time_col]),"%Y")
+      #this is to ensure that there is actually data this will fail if there is an empty dataframe.
+      if(nrow(current_dat)==0){
+        cat(paste0("There is no ",p," data at ",i))
 
-          Data_Start <- min(current_dat[,time_col])
-          Data_End <- max(current_dat[,time_col])
-
-
-
-        }else{
-          current_dat <-current_dat[as.Date(current_dat[,time_col]) > as.Date(max(current_dat[,time_col]))-(365*as.numeric(Timeframe)),]
-
-          End_Year <-  format(max(current_dat[,time_col]),"%Y")
-          Start_Year <- format(max(current_dat[,time_col])- years(as.numeric(Timeframe)),"%Y")
-          Data_Start <- min(current_dat[,time_col])
-          Data_End <- max(current_dat[,time_col])
-
-        }
-
-        if(p %in% log_parameters){current_dat[,3] <- log10(current_dat[,3]+1)}
-
-        current_dat$myDate <- as.Date(as.character(current_dat[,time_col]),"%Y-%m-%d")
-        current_dat <- GetMoreDateInfo(current_dat)
+        #this is the other case if no data.
+        Trend_Analysis <- data.frame( "nObs" = "NOT ENOUGH DATA","S"= NA,"VarS"= NA,"D"= NA,"tau"= NA,"Z"=NA,"p"= NA,"Probability"= NA,
+                                      "prop.censored"= NA,"prop.unique"= NA,"no.censorlevels"= NA,"Median"= NA,"Sen_VarS"= NA,"AnnualSenSlope"= NA,
+                                      "Intercept"= NA,"Lci"= NA,"Uci"= NA,"AnalysisNote"= NA,"Sen_Probability"= NA,"Probabilitymax"= NA,"Probabilitymin"= NA,
+                                      "Percent.annual.change"= NA,"TrendCategory"= NA,"TrendDirection"= NA, "Season_ADJ"= NA,"Season_ADJ_p"= NA ,"Flow_ADJ"= NA,"Flow_MOD"= NA,"Flow_MOD_p"= NA,
+                                      "Site"= i,"analyte"= p,"Start_Year"= Start_Year,"End_Year"= End_Year,"Time_Period"=Timeframe)
 
 
-        if(season == "month"|season=="MONTH"|season=="Month"){
+      } else if(nrow(current_dat)>0){
 
-          current_dat$Season<-current_dat$Month
-          SeasonString<-levels(current_dat$Season)
-        }else if(season == "quarter"|season=="QUARTER"|season=="Quarter"){
-          current_dat$Season<-current_dat$Qtr
-          SeasonString<-levels(current_dat$Season)
-        }else{
-          current_dat$Season<-current_dat$CustomYear
-          SeasonString<-levels(current_dat$Season)
-        }
-
-
-        NewValues <- RemoveAlphaDetect(current_dat[,p])
-        current_dat <- cbind.data.frame(current_dat, NewValues)
-
-
-        current_dat_FA <- current_dat[complete.cases(current_dat),]
-        adj <- AdjustValues(current_dat_FA[complete.cases(current_dat_FA),], method = c("Gam","LOESS"),main=paste(i, ": Flow Adjustment",sep=""), ValuesToAdjust = 'RawValue', Covariate = Co_variate_col, Span = c(0.7,0.8,0.9),doPlot = F, plotpval=T)
-        minflowp <- min(adj$LOESS0.7_p[1],adj$Gam_p[1])
-
-        #which dataset to use?
-        if(is.na(minflowp)==F & minflowp<0.05){
-
-          flowmod <- colnames(adj[which(adj[1,]==minflowp)])
-          flowmod_data <- substr(flowmod,1,nchar(flowmod)-2)
-          current_dat_FA<-merge(current_dat_FA[complete.cases(current_dat_FA),],adj[,c('myDate',flowmod_data)])
-
-          #create plot
-          #          png(filename=paste(i,"_",p,"_Flow_adjust",".png",sep = ""))
-          #          AdjustValues(current_dat[complete.cases(current_dat),], method = c("Gam","LOESS"),main=paste(i,"_",p,": Flow Adjustment",sep=""), ValuesToAdjust = 'RawValue', Covariate = Co_variate_col, Span = c(0.7,0.8,0.9),doPlot = T, plotpval=T)
-          #          dev.off()
-
-          Co_variate_Adjust = T
+        #if timeframe was set to 'all' - SET current data frame to the correct timescale
+        if(is.na(Timeframe)){
+          current_dat <-current_dat %>% filter(as.Date(current_dat[[time_col]],tz="etc/GMT+12")>
+                                                 as.Date(ContinuousTS(current_dat, gap = Data_gap * 365), tz = "etc/GMT+12"))
+          Start_Year <-  format(min(current_dat[[time_col]],na.rm=T),"%Y")
+          End_Year <-  format(max(current_dat[[time_col]],na.rm=T),"%Y")
 
         }else{
+          #otherwise subset to the current date minus timeframe as a number
+          current_dat <-current_dat %>% filter(as.Date(current_dat[[time_col]],tz="etc/GMT+12")>
+                                                 (as.Date(max(current_dat[[time_col]]), tz = "etc/GMT+12")-years(Timeframe)))
 
-          Co_variate_Adjust = F
+          #and then check to see if the dataset is continuous
+          current_dat <-current_dat %>% filter(as.Date(current_dat[[time_col]],tz="etc/GMT+12")>
+                                                 as.Date(ContinuousTS(current_dat, gap = Data_gap * 365), tz = "etc/GMT+12"))
+
+          End_Year <-  format(max(current_dat[[time_col]],na.rm=T),"%Y")
+          Start_Year <-  format(min(current_dat[[time_col]],na.rm=T),"%Y")
         }
+        #does the parameter need to be log scaled?
+        if(p %in% log_parameters){
+          current_dat[,3] <- log10(current_dat[,3]+1)
+          cat(paste0("Parameter ",p," has been log10 transformed at ", i,"\n"))
 
-        #make sure have both datasets
-        current_dat <- current_dat[complete.cases(current_dat[,-4]),-4]
-
-        #Check for enough data to run analysis (20 values)
-        if(Co_variate_Adjust ==T){
-          Run_Analysis <- ifelse(nrow(current_dat_FA[,1:3])>=20,TRUE,FALSE)
-        }else{
-          Run_Analysis <- ifelse(nrow(current_dat[,1:3])>=20,TRUE,FALSE)
-        }
-
-        if(Run_Analysis == T){
-
-
-          if(Co_variate_Adjust ==T){
-            pst <- SeasonalityTest(current_dat_FA,main=paste(i, ": Co-variate Adjusted Monthly Data",sep=""),do.plot = F)
-          }else{
-            pst <- SeasonalityTest(current_dat,main=paste(i, ": Raw Monthly Data",sep=""),do.plot = F)
           }
 
+        #only run trend analysis if you have more than min_values
+        if(nrow(current_dat[,1:3])>=min_values){
 
-          if(pst$pvalue<0.05){
+          #create a new column called myDate
+          current_dat <- current_dat %>% mutate(myDate = as.Date(current_dat[[time_col]],tz="etc/GMT+12"))
+          current_dat <- GetMoreDateInfo(current_dat)
 
-            if(Co_variate_Adjust==T){
-              Trend_Analysis <- SeasonalTrendAnalysis(current_dat_FA,ValuesToUse=flowmod_data,mymain=paste(i,"_",p,"_Co_variate_Adjusted: Seasonal Trend Analysis",sep=""),doPlot=F)
+          #remove alpha detects
+          current_dat <-  RemoveAlphaDetect(current_dat,ColToUse = p)
 
-              if(Trend_Analysis$TrendCategory == "Not Analysed"){
-                Trend_Analysis <- SeasonalTrendAnalysis(current_dat,ValuesToUse="RawValue",mymain=paste(i,"_",p,"_Co_variate_Adjusted: Seasonal Trend Analysis",sep=""),doPlot=F)
+          #inspect data
+          current_dat <- InspectTrendData(current_dat)
 
-                Trend_Analysis$Flow_ADJ <- "Attempted"
-                Trend_Analysis$Flow_MOD <- flowmod_data
-                Trend_Analysis$Flow_MOD_p <- minflowp
+          if(!is.na(Co_variate_col)){
 
+            #### work out if the data should be Co_variate adjusted ####
+            #run covariate adjustment models
+            adj <- AdjustValues(current_dat[complete.cases(current_dat),], method = c("Gam","LOESS"),main=paste(i, ": Co_variate_Adjustment_",Timeframe,sep=""), ValuesToAdjust = 'RawValue', Covariate = Co_variate_col, Span = c(0.7,0.8,0.9),doPlot = F, plotpval=T)
 
-              }else{
+            #work out the smallest p value
+            minflowp <- min(adj$LOESS0.7_p[1],adj$Gam_p[1]) #based on the lowess 0.7 model or gam...
 
-                Trend_Analysis$Flow_ADJ <- "YES"
-                Trend_Analysis$Flow_MOD <- flowmod_data
-                Trend_Analysis$Flow_MOD_p <- minflowp
+            ######## NEED TO INSERT SOME OUTPUT FOR CREATING PLOTS THAT SHOW WHAT THE ADJUSTMENT LOOKS LIKE ####
+
+            if(minflowp <= 0.05){
+
+              cat(paste0("A relationship between ",p," and ",Co_variate_col,  " detected at ", i," with a pvalue = ",as.numeric(round(minflowp)),"\n"))
+
+              #name of the CV adjustment model used
+              CVmod <- colnames(adj[which(adj[1,]==minflowp)])
+
+              #removing _p from string
+              CVmod_data <- substr(CVmod,1,nchar(CVmod)-2)
+
+              #merge current dat with adjusted values
+              current_dat<-merge(current_dat[complete.cases(current_dat),],adj[,c('myDate',CVmod_data)])
+
+              Co_variate_Adjust = T
+            }else{
+              cat(paste0("No relationship between ",p," and ",Co_variate_col,  " detected at ", i,". Pvalue = ",as.numeric(round(minflowp)),"\n"))
+              Co_variate_Adjust = F
+            }
+          }else{
+            Co_variate_Adjust = F
+          }
+
+        #### work out if the data should be seasonally adjusted ####
+            #add appropriate season to data
+          current_dat <- GetSeason(current_dat)[[1]]
+            #run seasonality test
+            seasonp <- GetSeason(current_dat)[[2]][1,3]
+
+            if(seasonp <= 0.05){
+              cat(paste0("Seasonality detected in ",p," at ", i," with a pvalue of ",as.numeric(round(seasonp)), "\n"))
+
+              ######## NEED TO INSERT SOME OUTPUT FOR CREATING PLOTS THAT SHOW WHAT THE SEASONAL DIFFERENCES LOOK LIKE ####
+              if(Co_variate_Adjust == T){
+
+                Trend_Analysis <- SeasonalTrendAnalysis(current_dat,ValuesToUse=CVmod_data,Timeframe,doPlot=F)
+                Trend_Analysis$CV_ADJ <- "YES"
+                Trend_Analysis$CV_MOD <- CVmod_data
+                Trend_Analysis$CV_MOD_p <- minflowp
+
+              }else{# if not co-variate adjusted
+
+                Trend_Analysis <- SeasonalTrendAnalysis(current_dat,Timeframe,doPlot=F)
+                #metadata to state that it was not covariate adjusted
+                Trend_Analysis$CV_ADJ <- "NO"
+                Trend_Analysis$CV_MOD <- "N/A"
+                Trend_Analysis$CV_MOD_p <- "N/A"
 
               }
 
+              Trend_Analysis$Season_ADJ <- "YES"
+              Trend_Analysis$Season_ADJ_p <- seasonp
 
+            }else{ #if there is no seasonality in data
+              cat(paste0("No seasonality detected in ",p," at ", i,". Pvalue = ",as.numeric(round(seasonp,4)),"\n"))
 
-            }else{
-              Trend_Analysis <- SeasonalTrendAnalysis(current_dat,ValuesToUse="RawValue",mymain=paste(i,"_",p,"_Raw Data: Seasonal Trend Analysis",sep=""),doPlot=F)
-              Trend_Analysis$Flow_ADJ <- "NO"
-              Trend_Analysis$Flow_MOD <- "N/A"
-              Trend_Analysis$Flow_MOD_p <- "N/A"
+              if(Co_variate_Adjust == T){
 
+                Trend_Analysis <- NonSeasonalTrendAnalysis(current_dat,ValuesToUse=CVmod_data,doPlot=F)
+                Trend_Analysis$CV_ADJ <- "YES"
+                Trend_Analysis$CV_MOD <- CVmod_data
+                Trend_Analysis$CV_MOD_p <- minflowp
+
+              }else{# if not co-variate adjusted
+
+                Trend_Analysis <- NonSeasonalTrendAnalysis(current_dat,doPlot=F)
+                #metadata to state that it was not covariate adjusted
+                Trend_Analysis$CV_ADJ <- "NO"
+                Trend_Analysis$CV_MOD <- "N/A"
+                Trend_Analysis$CV_MOD_p <- "N/A"
+
+              }
+
+              Trend_Analysis$Season_ADJ <- "NO"
+              Trend_Analysis$Season_ADJ_p <- "N/A"
 
             }
 
-            Trend_Analysis$Season_ADJ <- "YES"
-            Trend_Analysis$Season_ADJ_p <- pst$pvalue
-            #Trend_Analysis <- Trend_Analysis[,c(1:8,10:18,9,19:29)]
+            #additional metadata
+            Trend_Analysis$Site <- i
+            Trend_Analysis$analyte <- p
+            Trend_Analysis$Start_Year <-Start_Year
+            Trend_Analysis$End_Year <- End_Year
+            Trend_Analysis$Time_Period <- Timeframe
 
-
-          }else{
-
-            if(Co_variate_Adjust==T){
-              Trend_Analysis <- NonSeasonalTrendAnalysis(current_dat_FA,ValuesToUse=flowmod_data,mymain=paste(i,"_",p,"_Co_variate_Adjusted: Non-Seasonal Trend Analysis",sep=""),doPlot=F)
-
-              Trend_Analysis$Flow_ADJ <- "YES"
-              Trend_Analysis$Flow_MOD <- flowmod_data
-              Trend_Analysis$Flow_MOD_p <- minflowp
 
             }else{
-              Trend_Analysis <- NonSeasonalTrendAnalysis(current_dat,ValuesToUse="RawValue",mymain=paste(i,"_",p,"_Raw Data: Non-Seasonal Trend Analysis",sep=""),doPlot=F)
-              Trend_Analysis$Flow_ADJ <- "NO"
-              Trend_Analysis$Flow_MOD <- "N/A"
-              Trend_Analysis$Flow_MOD_p <- "N/A"
+              #this is the other case if not more than 10 values - dataframe of NA values.
+              Trend_Analysis <- data.frame( "nObs" = "NOT ENOUGH DATA","S"= NA,"VarS"= NA,"D"= NA,"tau"= NA,"Z"=NA,"p"= NA,"Probability"= NA,
+                                            "prop.censored"= NA,"prop.unique"= NA,"no.censorlevels"= NA,"Median"= NA,"Sen_VarS"= NA,"AnnualSenSlope"= NA,
+                                            "Intercept"= NA,"Lci"= NA,"Uci"= NA,"AnalysisNote"= NA,"Sen_Probability"= NA,"Probabilitymax"= NA,"Probabilitymin"= NA,
+                                            "Percent.annual.change"= NA,"TrendCategory"= NA,"TrendDirection"= NA, "Season_ADJ"= NA,"Season_ADJ_p"= NA ,"Flow_ADJ"= NA,"Flow_MOD"= NA,"Flow_MOD_p"= NA,
+                                            "Site"= i,"analyte"= p,"Start_Year"= Start_Year,"End_Year"= End_Year,"Time_Period"=Timeframe)
+
             }
-
-            Trend_Analysis$Season_ADJ <- "NO"
-            Trend_Analysis$Season_ADJ_p <- "N/A"
-
-          }
-
-        }
-
-        #think this is incorrect
-
-        Trend_Analysis$Site <- i
-        Trend_Analysis$Param <- p
-        Trend_Analysis$Start_Year <-Start_Year
-        Trend_Analysis$End_Year <- End_Year
-        Trend_Analysis$Time_Period <- Timeframe
-        Trend_Analysis$Data_Start <- Data_Start
-        Trend_Analysis$Data_End <- Data_End
-        Trend_Analysis$Season <- season
-
-
-      }else{
-        Trend_Analysis <- data.frame( "nObs" = "INVALID DATASET","S"= NA,"VarS"= NA,"D"= NA,"tau"= NA,"Z"=NA,"p"= NA,"Probability"= NA,
-                                      "prop.censored"= NA,"prop.unique"= NA,"no.censorlevels"= NA,"Median"= NA,"Sen_VarS"= NA,"AnnualSenSlope"= NA,
-                                      "Intercept"= NA,"Lci"= NA,"Uci"= NA,"AnalysisNote"= NA,"Sen_Probability"= NA,"Probabilitymax"= NA,"Probabilitymin"= NA,
-                                      "Percent.annual.change"= NA,"TrendCategory"= NA,"TrendDirection"= NA,
-                                      "Flow_ADJ"= NA,"Flow_MOD"= NA,"Flow_MOD_p"=NA,"Season_ADJ"= NA, "Season_ADJ_p"= NA,"Site"= NA,"Param"= NA,"Start_Year"= NA,"End_Year"= NA,"Data_Start"=NA,"Data_End"=NA,"Season"=NA)
-
-        Trend_Analysis$Site <- i
-        Trend_Analysis$Param <- p
-        Trend_Analysis$Start_Year <-Start_Year
-        Trend_Analysis$End_Year <- End_Year
-        Trend_Analysis$Time_Period <- Timeframe
-        Trend_Analysis$Season <- season
 
 
 
       }
 
-
-
-
-
-
+      #merge together the holder and the trend analysis output
       Final_Df <- rbind(Final_Df,Trend_Analysis)
 
-
-    }
-  }
-
+      }#end of parameter loop
+    }#end of site loop
   return(Final_Df)
+  detach(plyr)
+  }#end of function
 
-}
+########
 
+Outliers_Z_Score <- function(dataset,probability = "0.99",output = "values",
+                             type = "z"){
 
-########################################################################################################
+  #c("z", "t", "chisq", "iqr", "mad")
 
-#Trend analysis with no adjustments for seasonality or co-variates.  This is just based on the raw data.
-Basic_Trend_Analysis <- function(Data,param_colnames,siteID_col,
-                                       time_col = "Time",
-                                       Timeframe="All",
-                                       season = "Quarter",
-                                 log_parameters = c("ECOLI","TSS","FC","ENT")){
-  require(plyr)
-  require(lubridate)
-  require(NADA)
-  require(gam)
+  names(dataset) <- c("LocationName", "Site", "Time",  "Parameter", "Value")
 
-  Data <- Data
-  param_colnames <- param_colnames
-  Data[,siteID_col] <- as.factor(Data[,siteID_col])
-  Final_Df <- NULL
-
-  for(i in levels(Data[,siteID_col])){
-
-    SiteName=i
-
-    for(p in param_colnames){
-
-      #two different data files
-
-      current_dat <- Data[Data[[siteID_col]]==i,c(siteID_col,time_col,p)]
+  library(tidyr)
+  Final_Dataset <- NA
+  Final_Outliers <- NA
 
 
-      if(sum(!is.na(current_dat[,p]))>20){
+  #assume LocationName is consistent
+  for (i in unique(dataset$LocationName)){
+
+    #these are locked for this project.  As columns.
+    for (x in unique(dataset$Parameter)){
+
+      Data_to_check <- dataset[dataset$LocationName == i & dataset$Parameter == x, ]
+
+      Data_to_check <- Data_to_check[complete.cases(Data_to_check),]
+      Outliers <- Data_to_check[scores(Data_to_check[,"Value"], type=type, prob=probability),]
+
+      Output_Data <- anti_join(Data_to_check,Outliers)
+
+      if(nrow(Output_Data >0)){
+        Output_Data$LocationName = i
+        Output_Data$Parameter = x
+        names(Output_Data) <- c("LocationName","Site","Time","Parameter","Value")
+        Final_Dataset <- rbind(Final_Dataset, Output_Data)
+      }
 
 
-        if(Timeframe == "All"|Timeframe=="all"){
-          current_dat <-current_dat[ as.Date(current_dat[,time_col]) >= as.Date(ContinuousTS_2(current_dat,gap = 3*365)),]
-
-
-          Start_Year <-  format(ContinuousTS_2(current_dat,gap = 3*365),"%Y")
-          End_Year <-  format(max(current_dat[,time_col]),"%Y")
-
-          Data_Start <- min(current_dat[,time_col])
-          Data_End <- max(current_dat[,time_col])
-
-
-
-        }else{
-          current_dat <-current_dat[as.Date(current_dat[,time_col]) >= as.Date(max(current_dat[,time_col]))-(365*as.numeric(Timeframe)),]
-
-          End_Year <-  format(max(current_dat[,time_col]),"%Y")
-          Start_Year <- format(max(current_dat[,time_col])- years(as.numeric(Timeframe)),"%Y")
-          Data_Start <- min(current_dat[,time_col])
-          Data_End <- max(current_dat[,time_col])
-
-        }
-
-
-        if(p %in% log_parameters){current_dat[,3] <- log10(current_dat[,3]+1)}
-
-
-        current_dat$myDate <- as.Date(as.character(current_dat[,time_col]),"%Y-%m-%d")
-        current_dat <- GetMoreDateInfo(current_dat)
-
-
-        if(season == "month"|season=="MONTH"|season=="Month"){
-
-          current_dat$Season<-current_dat$Month
-          SeasonString<-levels(current_dat$Season)
-        }else if(season == "quarter"|season=="QUARTER"|season=="Quarter"){
-          current_dat$Season<-current_dat$Qtr
-          SeasonString<-levels(current_dat$Season)
-        }else{
-          current_dat$Season<-current_dat$CustomYear
-          SeasonString<-levels(current_dat$Season)
-        }
-
-
-        NewValues <- RemoveAlphaDetect(current_dat[,p])
-        current_dat <- cbind.data.frame(current_dat, NewValues)
-
-
-
-        #make sure have both datasets
-        current_dat <- current_dat[complete.cases(current_dat),]
-
-        #Check for enough data to run analysis (20 values)
-
-        Run_Analysis <- ifelse(nrow(current_dat[,1:3])>=20,TRUE,FALSE)
-
-
-        if(Run_Analysis == T){
-
-          pst <- SeasonalityTest(current_dat,main=paste(i, ": Raw Monthly Data",sep=""),do.plot = F)
-
-          if(pst$pvalue<0.05){
-            Trend_Analysis <- SeasonalTrendAnalysis(current_dat,ValuesToUse="RawValue",mymain=paste(i,"_",p,"_Raw Data: Seasonal Trend Analysis",sep=""),doPlot=F)
-            Trend_Analysis$Flow_ADJ <- "NO"
-            Trend_Analysis$Flow_MOD <- "N/A"
-            Trend_Analysis$Flow_MOD_p <- "N/A"
-            Trend_Analysis$Season_ADJ <- "YES"
-            Trend_Analysis$Season_ADJ_p <- pst$pvalue
-            #Trend_Analysis <- Trend_Analysis[,c(1:8,10:18,9,19:29)]
-          }else{
-            Trend_Analysis <- NonSeasonalTrendAnalysis(current_dat,ValuesToUse="RawValue",mymain=paste(i,"_",p,"_Raw Data: Non-Seasonal Trend Analysis",sep=""),doPlot=F)
-            Trend_Analysis$Flow_ADJ <- "NO"
-            Trend_Analysis$Flow_MOD <- "N/A"
-            Trend_Analysis$Flow_MOD_p <- "N/A"
-            Trend_Analysis$Season_ADJ <- "NO"
-            Trend_Analysis$Season_ADJ_p <- "N/A"
-          }
-
-          Trend_Analysis$Site <- i
-          Trend_Analysis$Param <- p
-          Trend_Analysis$Start_Year <-Start_Year
-          Trend_Analysis$End_Year <- End_Year
-          Trend_Analysis$Time_Period <- Timeframe
-          Trend_Analysis$Data_Start <- Data_Start
-          Trend_Analysis$Data_End <- Data_End
-          Trend_Analysis$Season <- season
-
-        }else{
-          Trend_Analysis <- data.frame( "nObs" = "INVALID DATASET","S"= NA,"VarS"= NA,"D"= NA,"tau"= NA,"Z"=NA,"p"= NA,"Probability"= NA,
-                                        "prop.censored"= NA,"prop.unique"= NA,"no.censorlevels"= NA,"Median"= NA,"Sen_VarS"= NA,"AnnualSenSlope"= NA,
-                                        "Intercept"= NA,"Lci"= NA,"Uci"= NA,"AnalysisNote"= NA,"Sen_Probability"= NA,"Probabilitymax"= NA,"Probabilitymin"= NA,
-                                        "Percent.annual.change"= NA,"TrendCategory"= NA,"TrendDirection"= NA,
-                                        "Flow_ADJ"= NA,"Flow_MOD"= NA,"Flow_MOD_p"=NA,"Season_ADJ"= NA, "Season_ADJ_p"= NA,"Site"= NA,"Param"= NA,"Start_Year"= NA,"End_Year"= NA,"Data_Start"=NA,"Data_End"=NA,"Season"=NA)
-
-          Trend_Analysis$Site <- i
-          Trend_Analysis$Param <- p
-          Trend_Analysis$Start_Year <-Start_Year
-          Trend_Analysis$End_Year <- End_Year
-          Trend_Analysis$Time_Period <- Timeframe
-          Trend_Analysis$Season <- season
-
-        }
-
-        Final_Df <- rbind(Final_Df,Trend_Analysis)
-
-      }else{
-
-        Trend_Analysis <- data.frame( "nObs" = "INVALID DATASET","S"= NA,"VarS"= NA,"D"= NA,"tau"= NA,"Z"=NA,"p"= NA,"Probability"= NA,
-                                      "prop.censored"= NA,"prop.unique"= NA,"no.censorlevels"= NA,"Median"= NA,"Sen_VarS"= NA,"AnnualSenSlope"= NA,
-                                      "Intercept"= NA,"Lci"= NA,"Uci"= NA,"AnalysisNote"= NA,"Sen_Probability"= NA,"Probabilitymax"= NA,"Probabilitymin"= NA,
-                                      "Percent.annual.change"= NA,"TrendCategory"= NA,"TrendDirection"= NA,
-                                      "Flow_ADJ"= NA,"Flow_MOD"= NA,"Flow_MOD_p"=NA,"Season_ADJ"= NA, "Season_ADJ_p"= NA,"Site"= NA,"Param"= NA,"Start_Year"= NA,"End_Year"= NA,"Data_Start"=NA,"Data_End"=NA,"Season"=NA)
-
-        Trend_Analysis$Site <- i
-        Trend_Analysis$Param <- p
-        Trend_Analysis$Start_Year <-Start_Year
-        Trend_Analysis$End_Year <- End_Year
-        Trend_Analysis$Time_Period <- Timeframe
-        Trend_Analysis$Season <- season
-
+      if(nrow(Outliers >0)){
+        Outliers$LocationName = i
+        Outliers$Parameter = x
+        names(Outliers) <- c("LocationName","Site","Time","Parameter","Value")
+        Final_Outliers <- rbind(Final_Outliers, Outliers)
       }
 
     }
+
+
   }
-  return(Final_Df)
+
+  Final_Dataset <- Final_Dataset[-1,]
+  Final_Outliers <- Final_Outliers[-1,]
+
+  if(output == "values"){
+    return(Final_Dataset)
+  } else if (output == "outliers"){
+    return(Final_Outliers)
+  }
+
+
 }
 
-###############################################################
 
-ImprovementConfCat_BOPRC <- function (x, Reverse = c("CLAR","Final_Clarity" ,"MCI","QMCI","ASPM","Bottom_DO","MidHyp_DO",
-                                                  "Native"))
-{
-  P <- x$Probability
-  if (!is.na(Reverse[1])) {
-    P[x$npID %in% Reverse] <- 1 - P[x$npID %in% Reverse]
-  }
-  ConfCats <- cut(P, breaks = c(-0.01, 0.01, 0.05, 0.1, 0.33,
-                                0.67, 0.9, 0.95, 0.99, 1.01), labels = c("Exceptionally unlikely",
-                                                                         "Extremely unlikely", "Very unlikely", "Unlikely",
-                                                                         "As likely as not", "Likely", "Very likely",
-                                                                         "Extremely likely", "Virtually certain"))
-  ConfCats <- as.character(ConfCats)
-  ConfCats[is.na(ConfCats)] <- "Not Analysed"
-  ConfCats <- factor(ConfCats, levels = c("Exceptionally unlikely",
-                                          "Extremely unlikely", "Very unlikely", "Unlikely",
-                                          "As likely as not", "Likely", "Very likely",
-                                          "Extremely likely", "Virtually certain",
-                                          "Not Analysed"))
-  return(ConfCats)
-}
+
