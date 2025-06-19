@@ -1,11 +1,11 @@
 Package: LWPTrends
 Type: Package
-Title: What the Package Does (Title Case)
-Version: 0.1.2
-Author: Who wrote it
-Maintainer: The package maintainer <yourself@somewhere.net>
-Description: More about what it does (maybe more than one line)
-    Use four spaces when indenting paragraphs within the Description.
+Title: Functions for statistical trend analysis
+Version: 1.0.0
+Author: James Dare (based on functions from Ton Snelder and Caroline Fraser (LWP))
+Maintainer: James Dare <james.dare@boprc.govt.nz>
+Description: This package is based on the functions written by Ton Snelder and Caroline Fraser (LWP).  
+    Additional functions are written by James Dare (BOPRC) to make these functions more applicable to BOPRC data. 
 License: What license is it under?
 Encoding: UTF-8
 LazyData: true
